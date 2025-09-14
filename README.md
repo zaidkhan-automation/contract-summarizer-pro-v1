@@ -16,8 +16,7 @@ Supports fallback extractive summaries (no API key) or abstractive legal summari
 ---
 
 ## 🚀 Live App  
-👉 [*Try it here*](https://your-streamlit-deploy-link.streamlit.app)  
-
+👉 [*Try it here*]https://contract-summarizer-pro-v1-ll2nmdxkxvgvn4mwecxv8v.streamlit.app/
 ---
 
 ## 📸 Screenshots  
