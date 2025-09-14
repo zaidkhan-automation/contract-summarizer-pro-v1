@@ -1,0 +1,11 @@
+streamlit
+pypdf2
+pdfplumber
+openai
+python-docx
+pandas
+tiktoken
+python-dateutil
+transformers
+sentence-transformers
+faiss-cpu
