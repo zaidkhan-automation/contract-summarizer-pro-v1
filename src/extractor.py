@@ -14,16 +14,11 @@ from typing import List, Dict
 
 import pdfplumber
 import docx  # python-docx
-import nltk
+import re
 
-# Ensure nltk punkt is available for sentence tokenization
-try:
-    nltk.data.find("tokenizers/punkt")
-except Exception:
-    nltk.download("punkt")
-
-from nltk.tokenize import sent_tokenize
-
+def split_sentences(text: str):
+    # Simple regex-based sentence splitter (no nltk needed)
+    return re.split(r'(?<=[.!?]) +', text)
 
 def _read_pdf_text(path: str) -> str:
     """Extract text from a digital PDF using pdfplumber."""
@@ -66,7 +61,7 @@ def chunk_text_by_sentences(text: str, chunk_size: int = 800, overlap: int = 100
     if not text:
         return []
 
-    sentences = sent_tokenize(text)
+    sentences = split_sentences(text)
     chunks = []
     current_chunk = ""
     for sent in sentences:
