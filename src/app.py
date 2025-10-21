@@ -1,124 +1,168 @@
-"""
-src/app.py
-
-Streamlit UI for Contract Summarizer Pro v1.
-- Upload PDF/DOCX
-- Extract & chunk text
-- Summarize with OpenAI if OPENAI_API_KEY is provided, otherwise a simple fallback summary
-- Preview chunks and download summary
-"""
+# streamlit_app.py — Contract Summarizer Pro (demo + unlock CTA)
+# --------------------------------------------------------------
+# Features:
+# - Daily free limit (session-based) + banner
+# - Editable-amount Razorpay unlock CTA
+# - PDF size guard (per file)
+# - Multi-file upload (1 click = 1 run)
+# - Calls FastAPI backend: POST {API_BASE}{CONTRACT_ENDPOINT}
+# - Smart response handling (JSON summaries), pretty display + download
 
 import os
+import io
+import json
+import datetime as dt
+import requests
 import streamlit as st
-from extractor import uploaded_file_to_chunks
-from io import BytesIO
-import base64
-import textwrap
 
-# Try to import openai; app still works without it (fallback summary)
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-except Exception:
-    OPENAI_AVAILABLE = False
+# ------------------- CONFIG -------------------
+st.set_page_config(page_title="Contract Summarizer Pro", page_icon="📑", layout="centered")
 
-st.set_page_config(page_title="Contract Summarizer Pro v1", layout="centered")
-st.title("📝 Contract Summarizer — Pro v1")
-st.write("Upload a contract (PDF or DOCX). The app extracts text, chunks it, and provides a short summary.")
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
+CONTRACT_ENDPOINT = os.getenv("CONTRACT_ENDPOINT", "/summarize")  # e.g. "/summarize" or "/contracts/summarize"
+FREE_LIMIT_PER_DAY = int(os.getenv("FREE_LIMIT_PER_DAY", "3"))
+RAZORPAY_LINK = os.getenv("RAZORPAY_LINK", "https://razorpay.me/@taskmindai")  # editable amount link
+CONTACT_MAILTO = os.getenv(
+    "CONTACT_MAILTO",
+    "mailto:contact@taskmindai.net?subject=TaskMindAI%20Contract%20Summarizer%20Access"
+)
+MAX_MB = float(os.getenv("DEMO_MAX_MB", "8"))  # per-file cap
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "240"))
 
-# Sidebar options
-st.sidebar.header("Options")
-chunk_size = st.sidebar.number_input("Chunk size (chars, approx)", min_value=300, max_value=3000, value=1000, step=100)
-overlap = st.sidebar.number_input("Chunk overlap (chars)", min_value=0, max_value=500, value=150, step=50)
-summary_chunks = st.sidebar.number_input("Number of chunks to include in quick summary", min_value=1, max_value=10, value=3, step=1)
-openai_model = st.sidebar.selectbox("OpenAI model (if key provided)", ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4"], index=0)
+# ------------------- DEMO LIMIT (BANNER) -------------------
+if "usage_count" not in st.session_state:
+    st.session_state.usage_count = 0
+if "last_reset" not in st.session_state:
+    st.session_state.last_reset = dt.date.today()
 
-# File uploader
-uploaded = st.file_uploader("Upload contract (PDF or DOCX)", type=["pdf", "docx"])
+# daily reset
+if st.session_state.last_reset != dt.date.today():
+    st.session_state.usage_count = 0
+    st.session_state.last_reset = dt.date.today()
 
-if uploaded is not None:
-    st.info("Extracting text and creating chunks...")
-    try:
-        chunks = uploaded_file_to_chunks(uploaded, chunk_size=chunk_size, overlap=overlap)
-    except Exception as e:
-        st.error(f"Failed to extract text: {e}")
+st.markdown(
+    f"""
+    <div style="background:#111a3a;border:1px solid #223060;padding:10px 12px;border-radius:10px;margin-bottom:12px;">
+      ⚙ <b>Daily usage:</b> {st.session_state['usage_count']} / {FREE_LIMIT_PER_DAY} free runs.<br>
+      🔓 <span style="color:#9fb7ff">Need full unlimited access?</span><br>
+      <a href="{RAZORPAY_LINK}" target="_blank" style="color:#9cf;font-weight:700;">Pay to Unlock (amount editable)</a> ·
+      <a href="{CONTACT_MAILTO}" style="color:#9cf;">Contact us</a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+def check_limit_or_stop():
+    """Stop processing if today's free quota is over."""
+    if st.session_state.usage_count >= FREE_LIMIT_PER_DAY:
+        st.error("Demo limit reached for today. Unlock full access below.")
+        st.link_button("💳 Pay to Unlock (Editable Amount)", RAZORPAY_LINK, use_container_width=True)
+        st.link_button("📧 Contact for custom pricing", CONTACT_MAILTO, use_container_width=True)
         st.stop()
 
-    if not chunks:
-        st.warning("No text found in file. If the PDF is scanned, OCR is required (future feature).")
-    else:
-        st.success(f"Extracted {len(chunks)} chunks from file.")
+# Optional sidebar meter
+with st.sidebar:
+    st.subheader("Usage")
+    st.progress(min(st.session_state.usage_count / FREE_LIMIT_PER_DAY, 1.0))
+    st.caption(f"{st.session_state.usage_count} of {FREE_LIMIT_PER_DAY} free runs today")
+    st.caption(f"Demo PDF size cap: {MAX_MB:.0f} MB")
+    st.markdown("---")
+    st.caption(f"API: {API_BASE}{CONTRACT_ENDPOINT}")
 
-        # Show first few chunks preview
-        st.subheader("Preview — first chunks")
-        preview_count = min(5, len(chunks))
-        for i in range(preview_count):
-            st.markdown(f"*Chunk {i}*")
-            st.code(textwrap.shorten(chunks[i]["text"], width=800, placeholder="..."))
+# ------------------- UI -------------------
+st.title("📑 Contract Summarizer Pro")
+st.write("Upload 1–3 PDF contracts and get clean, structured summaries.")
 
-        # Summarize section
-        st.subheader("Summarize")
+col1, col2 = st.columns(2)
+with col1:
+    files = st.file_uploader("Choose contract PDF(s)", type=["pdf"], accept_multiple_files=True,
+                             help=f"Up to 3 files per run • {int(MAX_MB)}MB each")
+with col2:
+    concise = st.checkbox("Concise mode (shorter TL;DR)", value=True)
+    include_risks = st.checkbox("Emphasize risks/red flags", value=True)
 
-        use_openai = False
-        if "OPENAI_API_KEY" in os.environ and OPENAI_AVAILABLE:
-            st.write("OpenAI key found in environment. You may use OpenAI for an abstractive summary.")
-            use_openai = st.checkbox("Use OpenAI for summary (abstractive)", value=True)
-        else:
-            st.write("No OpenAI key found or openai package missing. Fallback extractive summary will be used.")
-            use_openai = False
+# ------------------- PROCESS -------------------
+if files:
+    st.success(f"{len(files)} file(s) selected.")
+    if st.button("🧠 Summarize", type="primary", use_container_width=True):
 
-        # Buttons
-        if st.button("Generate Summary"):
-            with st.spinner("Generating summary..."):
+        # 1) check demo limit (per click = 1 run)
+        check_limit_or_stop()
+
+        # 2) per-file size guard
+        for f in files[:3]:
+            size_mb = f.size / (1024 * 1024)
+            if size_mb > MAX_MB:
+                st.error(f"⚠ Demo limit: '{f.name}' is {size_mb:.2f} MB. Max allowed is {MAX_MB:.0f} MB per file.")
+                st.stop()
+
+        # 3) call backend
+        with st.spinner("Summarizing... give me a moment to read your legal poetry."):
+            try:
+                # send up to first 3 files
+                mp = []
+                for f in files[:3]:
+                    mp.append(("files", (f.name, f.getvalue(), "application/pdf")))
+                data = {
+                    "concise": "true" if concise else "false",
+                    "risks": "true" if include_risks else "false"
+                }
+                resp = requests.post(
+                    f"{API_BASE}{CONTRACT_ENDPOINT}",
+                    files=mp,
+                    data=data,
+                    timeout=REQUEST_TIMEOUT
+                )
+            except Exception as e:
+                st.error(f"Backend unreachable. Check API_BASE/endpoint. Error: {e}")
+                st.stop()
+
+        # 4) handle response (expecting JSON: {"results":[{"file":..., "summary": "..."}]})
+        if resp.status_code == 200:
+            try:
+                payload = resp.json()
+            except Exception:
                 try:
-                    if use_openai:
-                        # Prepare prompt: concatenate top N chunks
-                        top_n = min(summary_chunks, len(chunks))
-                        context = "\n\n".join([chunks[i]["text"] for i in range(top_n)])
-                        prompt = (
-                            "You are a concise legal assistant. Read the following contract excerpts and produce a clear, "
-                            "concise summary (5-8 bullet points) highlighting parties, purpose, key obligations, payment terms, "
-                            "important dates, and risks or termination clauses if present.\n\n"
-                            f"CONTEXT:\\n{context}\\n\\nSUMMARY:"
-                        )
+                    payload = json.loads(resp.text)
+                except Exception:
+                    st.error("Could not parse server response.")
+                    st.stop()
 
-                        # Use OpenAI API
-                        openai.api_key = os.environ.get("OPENAI_API_KEY")
-                        resp = openai.ChatCompletion.create(
-                            model=openai_model,
-                            messages=[{"role": "user", "content": prompt}],
-                            max_tokens=400,
-                            temperature=0.0,
-                        )
-                        # get content (compatible with ChatCompletion)
-                        summary_text = resp["choices"][0]["message"]["content"].strip()
-                    else:
-                        # Fallback: join first N chunks and return that as "summary"
-                        top_n = min(summary_chunks, len(chunks))
-                        summary_text = "\n\n".join([chunks[i]["text"] for i in range(top_n)])
-                        # Trim to reasonable length
-                        summary_text = summary_text[:3000] + ("..." if len(summary_text) > 3000 else "")
+            results = payload.get("results") or payload.get("summaries") or []
+            if not isinstance(results, list):
+                results = []
 
-                    # Show summary
-                    st.subheader("Summary")
-                    st.write(summary_text)
+            if results:
+                st.success("✅ Summaries ready")
+                all_out = []
+                for item in results:
+                    fname = item.get("file") or "contract.pdf"
+                    summary = item.get("summary") or item.get("text") or ""
+                    st.subheader(f"📎 {fname}")
+                    st.markdown(summary if summary else "No summary text returned.")
+                    all_out.append({"file": fname, "summary": summary})
+                # download combined JSON
+                st.download_button(
+                    "📥 Download all summaries (JSON)",
+                    data=json.dumps({"results": all_out}, indent=2).encode("utf-8"),
+                    file_name="contract_summaries.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+                st.caption("Generated via TaskMindAI · taskmindai.net")
+                # increment quota usage only on success
+                st.session_state.usage_count += 1
+            else:
+                st.info("No summaries returned. Try fewer pages or a clearer PDF.")
 
-                    # Offer download
-                    b = summary_text.encode("utf-8")
-                    b64 = base64.b64encode(b).decode()
-                    href = f'<a href="data:text/plain;base64,{b64}" download="summary.txt">Download summary (TXT)</a>'
-                    st.markdown(href, unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"Summary generation failed: {e}")
+        else:
+            # try to extract error
+            msg = ""
+            try:
+                msg = resp.json().get("detail", "")
+            except Exception:
+                msg = resp.text[:500]
+            st.error(f"Summarization failed (status {resp.status_code}). {msg or 'Please try another file.'}")
 
-        # Optionally show all chunks
-        with st.expander("Show all chunks"):
-            for c in chunks:
-                st.code(c["text"][:1200] + ("..." if len(c["text"]) > 1200 else ""))
-
-        # Small note for clients
-        st.markdown(
-            "<small>Note: This is a v1 summarizer. For scanned PDFs, enable OCR (Tesseract) or use cloud OCR. "
-            "For production we offer private deployments with authentication and auto-delete of uploaded files.</small>",
-            unsafe_allow_html=True,
-        )
+else:
+    st.info("Please upload contract PDF(s) to begin.")
